@@ -3,6 +3,8 @@ import zipfile
 import struct
 
 class DiskImage():
+  ''' Basic disk image in memory '''
+
   def __init__(self, sides: int, tracksPerSide: int, sectorsPerTrack: int):
     self.sides = sides
     self.tracks = tracksPerSide
@@ -23,7 +25,7 @@ class DiskImage():
     return self.sectorMap[side][track][sector]
 
 class SamDos():
-  pass 
+  ''' tools for reading files from a SamDOS file system '''
 
   class dirEnt():
     fileTypes = {
@@ -94,20 +96,58 @@ class SamDos():
     data = data[9:]
     return fileHdr,data[:fileInfo.totalBytes]
 
+class MasterDos(SamDos):
+  ''' overload SamDOS class with MasterDOS extensions '''
+  
+  class dirEnt(SamDos.dirEnt):
+    def __init__(self, data: bytes):
+      super().__init__(data)
+      self.fileTypes[21] = ("Sub Directory","DIR")
+      self.isDir = (self.fileType == 21)
+      self.inDir = data[254]
+
+    def __str__(self):
+      return("%10s %8d %s"%(self.filename.decode(), self.totalBytes, self.lookupType(self.fileType)))
+
+  def __init__(self, disk: DiskImage):
+    super().__init__(disk)
+    # subdirs
+    self.curDir = 0
+    # check for extra tracks
+    firstSector = self.diskImage.read(0,0,0)
+    extraDirTracks = firstSector[255]
+    if extraDirTracks:
+      extraEnts = 20*extraDirTracks - 2
+      for fileNum in range(80,80+extraEnts):
+        trackOs = int((2+fileNum)/20)
+        sectorOs = 1 + int(((2+fileNum)%20)/2)
+        data = self.diskImage.read(0,trackOs,sectorOs)
+        if(fileNum&1):
+          data = data[256:]
+        else:
+          data = data[:256]
+        self.directory[fileNum+1] = self.dirEnt(data)
+
+  def ls(self, subDir: int = 0):
+    for entry in self.directory.keys():
+      if self.directory[entry].fileType:
+        if self.directory[entry].inDir == subDir:
+          print("%2d %s"%(entry, self.directory[entry]))
 
 class DSK(DiskImage):
-  pass
+  ''' Specialised DiskImage - imports from standard DSK file '''
   
   def __init__(self, filename):
     self.filename = filename
+    self.zip = False
     super().__init__(2,80,10)
     if zipfile.is_zipfile(filename):
+      self.zip = True
       with zipfile.ZipFile(filename, 'r') as zf:
         data = zf.read(zf.infolist()[0])
     else:
       with open(filename, 'rb') as ff:
         data = ff.read()
-    print("Len: %d bytes"%len(data))
     for track in range(0,80):
       for side in range(0,2):
         for sector in range(1,11):
