@@ -42,6 +42,9 @@ commands = {
   182: "RETURN",    221: "ON ERROR",    
 }
 
+# short IF -> IF test THEN cmd: ELSE cmd:
+# long IF -> IF test: cmd: cmd: ELSE IF test2: cmd: cmd: [ ELSE: cmd : ]END IF
+
 qualifiers = {
   133: "USING", 137: "OFF",   141: "THEN",
   134: "WRITE", 138: "WHILE", 142: "TO",
@@ -76,6 +79,7 @@ functions = {
   82: "Reserved",107: "LEN",132: "Reserved",
   83: "SIN",108: "CODE",    
 }
+
 def expandLine(data: bytes):
   l = ""
   while(len(data)>1):
@@ -110,6 +114,7 @@ def processDataBlock(data: bytes):
   pass
   
 def basicToAscii(data: bytes):
+  ret = ""
   while len(data)>4:
     if data[0] == 0xff:
       processDataBlock(data[1:])
@@ -120,4 +125,5 @@ def basicToAscii(data: bytes):
       data=data[4:]
       line = data[:lineLen]
       data = data[lineLen:]
-      print("%5d: %s"%(lineNum, expandLine(line)))
+      ret += "%5d: %s"%(lineNum, expandLine(line))
+  return ret
