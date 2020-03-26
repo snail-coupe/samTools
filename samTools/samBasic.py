@@ -1,5 +1,15 @@
 import struct
 
+def hexDump(data: bytes) -> str:
+  ret = ""
+  while(data):
+    row = data[:16]
+    data = data[16:]
+    for b in row:
+      ret += "%2.2x "%b
+    ret += "\n"
+  return ret
+    
 commands = {
   144: "DIR",     183: "REM",       222: "ON",
   145: "FORMAT",  184: "READ",      223: "GET",
@@ -80,7 +90,7 @@ functions = {
   83: "SIN",108: "CODE",    
 }
 
-def expandLine(data: bytes):
+def expandLine(data: bytes) -> str:
   l = ""
   while(len(data)>1):
     if data[0]==0xff:
@@ -110,14 +120,15 @@ def expandLine(data: bytes):
     l += "<BAD EOL>"
   return l
 
-def processDataBlock(data: bytes):
-  pass
-  
-def basicToAscii(data: bytes):
+def processDataBlock(data: bytes) -> str:
+  ret = "[ %d long data section ]\n"%len(data)
+  return ret + hexDump(data)
+
+def basicToAscii(data: bytes) -> str:
   ret = ""
   while len(data)>4:
     if data[0] == 0xff:
-      processDataBlock(data[1:])
+      ret += processDataBlock(data[1:])
       data = b''
     else:
       lineNum=struct.unpack_from(">H",data,0)[0]
@@ -125,5 +136,5 @@ def basicToAscii(data: bytes):
       data=data[4:]
       line = data[:lineLen]
       data = data[lineLen:]
-      ret += "%5d: %s"%(lineNum, expandLine(line))
+      ret += "%5d: %s\n"%(lineNum, expandLine(line))
   return ret
