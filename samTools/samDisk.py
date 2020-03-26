@@ -1,6 +1,8 @@
 # class for doing stuff with DSK files
 import zipfile
+import gzip
 import struct
+import typing
 
 class DiskImage():
   ''' Basic disk image in memory '''
@@ -37,14 +39,16 @@ class SamDos():
       20: ("Screen file","SCREEN$")
     }
 
-    def __init__(self, data: bytes):
+    def __init__(self, fileNum: int, data: bytes):
       if len(data)!=256:
         raise ValueError("Wrong sized record")
       self.raw = data
+      self.fileNum = fileNum
       self.deleted = (data[0] == 0)
       self.hidden = data[0]>0x80
       self.protected = data[0]&0x40
       self.fileType = data[0]&0x3f
+      self.fileTypeStr = self.lookupType(self.fileType)
       self.filename = data[1:11] #.decode()
       (self.sectors, self.track, self.sector)=struct.unpack_from(">HBB",data,11)
       self.sectorAddressMap = data[15:210]
@@ -52,16 +56,19 @@ class SamDos():
       self.totalBytes = 16384*pages + remain
 
     def __str__(self):
-      return("%10s %8d %s"%(self.filename.decode(), self.totalBytes, self.lookupType(self.fileType)))
+      return("%3d: %10s %8d %s"%(self.fileNum, self.filename.decode(), self.totalBytes, self.lookupType(self.fileType)))
 
     def lookupType(self, code):
       if code in self.fileTypes:
         return self.fileTypes[code][1]
       return "???"
-  
+
+  DE = typing.TypeVar('DE', bound=dirEnt)
+
   def __init__(self, disk: DiskImage):
     self.diskImage = disk
     self.directory = {}
+    self.diskName = "SAM DOS"
     for fileNum in range(0,80):
       trackOs = int(fileNum/20)
       sectorOs = 1 + int((fileNum%20)/2)
@@ -70,14 +77,13 @@ class SamDos():
         data = data[256:]
       else:
         data = data[:256]
-      self.directory[fileNum+1] = self.dirEnt(data)
+      self.directory[fileNum+1] = self.dirEnt(fileNum+1,data)
 
   def ls(self):
-    for entry in self.directory.keys():
-      if self.directory[entry].fileType:
-        print("%2d %s"%(entry, self.directory[entry]))
+    for entry in iter(self):
+      print(entry)
 
-  def extractFile(self, fileNum):
+  def extractFile(self, fileNum: int) -> bytes:
     fileInfo = self.directory[fileNum]
     if(fileInfo.deleted):
       raise FileNotFoundError()
@@ -96,26 +102,51 @@ class SamDos():
     data = data[9:]
     return fileHdr,data[:fileInfo.totalBytes]
 
+  def __iter__(self):
+    self.ptr = 0
+    return self
+
+  def __next__(self) -> DE:
+    while True:
+      self.ptr+=1
+      if self.ptr not in self.directory.keys():
+        raise StopIteration
+      if self.directory[self.ptr].fileType:
+        return self.directory[self.ptr]    
+      
 class MasterDos(SamDos):
   ''' overload SamDOS class with MasterDOS extensions '''
-  
+
   class dirEnt(SamDos.dirEnt):
-    def __init__(self, data: bytes):
-      super().__init__(data)
+    # clone fileTypes so don't modify base case
+    fileTypes = SamDos.dirEnt.fileTypes.copy()
+
+    def __init__(self, fileNum: int, data: bytes):
+      # extend fileTypes before calling super init
       self.fileTypes[21] = ("Sub Directory","DIR")
+      # Generic stuff
+      super().__init__(fileNum, data)
+      # MasterDOS specific
       self.isDir = (self.fileType == 21)
       self.inDir = data[254]
 
     def __str__(self):
-      return("%10s %8d %s"%(self.filename.decode(), self.totalBytes, self.lookupType(self.fileType)))
+      return("%3d %10s %8d %s"%(self.fileNum, self.filename.decode(), self.totalBytes, self.lookupType(self.fileType)))
 
   def __init__(self, disk: DiskImage):
+    # Start of disk looks like SamDOS
     super().__init__(disk)
-    # subdirs
+    # set working directory
     self.curDir = 0
-    # check for extra tracks
+
+    # MasterDOS Specific
     firstSector = self.diskImage.read(0,0,0)
     extraDirTracks = firstSector[255]
+    if firstSector[210]:
+      self.diskName = firstSector[210:220].decode().strip()
+    else:
+      self.diskName = "MASTER DOS"
+
     if extraDirTracks:
       extraEnts = 20*extraDirTracks - 2
       for fileNum in range(80,80+extraEnts):
@@ -126,13 +157,37 @@ class MasterDos(SamDos):
           data = data[256:]
         else:
           data = data[:256]
-        self.directory[fileNum+1] = self.dirEnt(data)
+        self.directory[fileNum+1] = self.dirEnt(fileNum+1,data)
 
-  def ls(self, subDir: int = 0):
-    for entry in self.directory.keys():
-      if self.directory[entry].fileType:
-        if self.directory[entry].inDir == subDir:
-          print("%2d %s"%(entry, self.directory[entry]))
+  def __next__(self) -> SamDos.DE:
+    while True:
+      # use SamDos iterator but filter on working directory
+      ret = super().__next__()
+      if ret.inDir == self.curDir:
+        return ret
+
+  def pwd(self, subDir: int=None):
+    if subDir == None:
+      subDir = self.curDir
+    if subDir == 0:
+      return ":"
+    de = self.directory[subDir]
+    return self.pwd(de.inDir) + "\\" + de.filename.decode().strip()
+
+  def cd(self, subDir: int = None):
+    if subDir == None: 
+      subDir = self.curDir
+    if self.directory[subDir].isDir:
+      self.curDir = subDir
+    else:
+      raise TypeError("Not a Directory")
+
+  def parentDir(self, subDir: int = None):
+    if subDir == None:
+      subDir = self.curDir
+    if subDir == 0:
+      return 0
+    return self.directory[subDir].inDir
 
 class DSK(DiskImage):
   ''' Specialised DiskImage - imports from standard DSK file '''
@@ -146,8 +201,12 @@ class DSK(DiskImage):
       with zipfile.ZipFile(filename, 'r') as zf:
         data = zf.read(zf.infolist()[0])
     else:
-      with open(filename, 'rb') as ff:
-        data = ff.read()
+      try:
+        with gzip.open(filename) as ff:
+          data = ff.read()
+      except gzip.BadGzipFile:
+        with open(filename, 'rb') as ff:
+          data = ff.read()
     for track in range(0,80):
       for side in range(0,2):
         for sector in range(1,11):

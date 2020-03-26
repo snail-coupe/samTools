@@ -2,11 +2,19 @@ from samTools.samDisk import DSK, SamDos, MasterDos
 import samTools.samBasic
 
 ## print("opening")
-# dsk = SamDos(DSK("Example.zip"))
-dsk = MasterDos(DSK("untitled.mgt"))
-## print("listing")
-dsk.ls(1)
+sddsk = SamDos(DSK("untitled.mgt.gz"))
+mddsk = MasterDos(DSK("untitled.mgt.gz"))
+
+#print("%s:"%sddsk.diskName)
+#sddsk.ls()
+mddsk.cd(3)
+print("%s%s"%(mddsk.diskName,mddsk.pwd()))
+mddsk.ls()
+
+#for f in iter(dsk):
+#    if  f.fileTypeStr == "BASIC":
+#        print(f)
 ## print("extracting file #2")
-# f = dsk.extractFile(2)
+#f = dsk.extractFile(2)
 ## print("Converting SamBASIC to text")
-# samTools.samBasic.basicToAscii(f[1])
+#print(samTools.samBasic.basicToAscii(f[1]))
