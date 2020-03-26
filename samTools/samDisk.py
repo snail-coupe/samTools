@@ -26,9 +26,7 @@ class DiskImage():
     #print("%d:%d:%d"%(side,track,sector))
     return self.sectorMap[side][track][sector]
 
-class SamDos():
-  ''' tools for reading files from a SamDOS file system '''
-
+class Dos():
   class dirEnt():
     fileTypes = {
       5: ("ZX Snapshot file","SNP 48k"),
@@ -64,6 +62,9 @@ class SamDos():
       return "???"
 
   DE = typing.TypeVar('DE', bound=dirEnt)
+
+class SamDos(Dos):
+  ''' tools for reading files from a SamDOS file system '''
 
   def __init__(self, disk: DiskImage):
     self.diskImage = disk
@@ -106,7 +107,7 @@ class SamDos():
     self.ptr = 0
     return self
 
-  def __next__(self) -> DE:
+  def __next__(self) -> Dos.DE:
     while True:
       self.ptr+=1
       if self.ptr not in self.directory.keys():
@@ -129,6 +130,7 @@ class MasterDos(SamDos):
       # MasterDOS specific
       self.isDir = (self.fileType == 21)
       self.inDir = data[254]
+      self.dirTag = data[250]
 
     def __str__(self):
       return("%3d %10s %8d %s"%(self.fileNum, self.filename.decode(), self.totalBytes, self.lookupType(self.fileType)))
@@ -159,11 +161,11 @@ class MasterDos(SamDos):
           data = data[:256]
         self.directory[fileNum+1] = self.dirEnt(fileNum+1,data)
 
-  def __next__(self) -> SamDos.DE:
+  def __next__(self) -> Dos.DE:
     while True:
       # use SamDos iterator but filter on working directory
       ret = super().__next__()
-      if ret.inDir == self.curDir:
+      if ret.inDir == self.directory[self.curDir].dirTag:
         return ret
 
   def pwd(self, subDir: int=None):
