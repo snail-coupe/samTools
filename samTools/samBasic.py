@@ -1,13 +1,35 @@
 import struct
+import string 
+from typing import Union, List
+from .samDisk import Dos
+import math
+import pprint
 
-def hexDump(data: bytes) -> str:
+class FPCError(Exception):
+  ''' error in Floating Point Calculator '''
+
+class BasicEncodingError(Exception):
+  ''' Error in BASIC encoding '''
+
+def hexDump(data: bytes, prefix: str='') -> str:
   ret = ""
+  printables = range(32,128)
   while(data):
+    ret += prefix
+    chars = []
     row = data[:16]
     data = data[16:]
     for b in row:
       ret += "%2.2x "%b
-    ret += "\n"
+      if b in printables:
+        chars.append(chr(b))
+      else:
+        chars.append('.')
+    for _ in range(len(row), 16):
+      ret += "   "
+    ret += "    "
+    ret += "".join(chars)
+    ret += f"\n" 
   return ret
     
 commands = {
@@ -110,31 +132,172 @@ def expandLine(data: bytes) -> str:
       else:
         l += "<qualifier %d>"%data[0]
     elif data[0] == 0x0e:
+      # 0x fd fd pg ll hh appears to be an undocumented special
+      # case for the address of the DEF PROC
+      l += f"<<{hexDump(data[1:6])}>>"
+      l += f"<inline {fpc(data[1:6])}>" 
       data = data[5:]
     elif data[0]<0x20:
       l += "<%d>"%data[0]
     else:
       l += chr(data[0])
     data = data[1:]
-  if data[0] != 0x0d:
+  if not data or data[0] != 0x0d:
     l += "<BAD EOL>"
   return l
 
-def processDataBlock(data: bytes) -> str:
-  ret = "[ %d long data section ]\n"%len(data)
-  return ret + hexDump(data)
-
-def basicToAscii(data: bytes) -> str:
-  ret = ""
-  while len(data)>4:
-    if data[0] == 0xff:
-      ret += processDataBlock(data[1:])
-      data = b''
+def fpc(value: bytes) -> Union[int, float]:
+  if len(value) != 5:
+    raise FPCError(f"fpc input should be 5 bytes not {len(value)}")
+  
+  if value[0] == 0:  # int
+    sgn = value[1]
+    val = struct.unpack("<H", value[2:4])[0]
+    zero = value[4]
+    if zero != 0:
+      raise FPCError("Invlid Int (non-zero terminated)")
+    if not sgn:
+      return val
+    elif sgn == 0xff:
+      return -(65536-val)
     else:
-      lineNum=struct.unpack_from(">H",data,0)[0]
-      lineLen=struct.unpack_from("<H",data,2)[0]
-      data=data[4:]
-      line = data[:lineLen]
-      data = data[lineLen:]
-      ret += "%5d: %s\n"%(lineNum, expandLine(line))
+      raise FPCError(f"Invalid Int (bad sign 0x{sgn})")
+  
+  # float
+  e, sm = struct.unpack(">BI", value)
+  e = e-0x80
+  sgn = sm & 0x80000000
+  m = sm | 0x80000000 
+  val = 2**e * (m / 2**32)
+  if sgn:
+    val = -val
+  return val
+
+def unpackSvarNumberArray(data: bytes, dimlengths: List[int]):
+  if len(dimlengths)==1:
+    return [fpc(data[5*x:5*(x+1)]) for x in range(0,dimlengths[0])]
+  elif dimlengths.count==0:
+    raise BasicEncodingError("Can't have zero dimensioned array")
+  chunksize = math.prod(dimlengths[1:], start=5)
+  return [
+    unpackSvarNumberArray(data[x*chunksize:(x+1)*chunksize], dimlengths[1:])
+    for x in range(0, dimlengths[0])
+  ]
+
+def unpackSvarStringArray(data: bytes, dimlengths: List[int]):
+  if len(dimlengths)==2:
+    slen = dimlengths[1]
+    return [data[x*slen:(1+x)*slen].decode() for x in range(0,dimlengths[0])]
+  elif dimlengths.count==0:
+    raise BasicEncodingError("Can't have zero dimensioned array")
+  chunksize = math.prod(dimlengths[1:-1], start=dimlengths[-1])
+  return [
+    unpackSvarStringArray(data[x*chunksize:(x+1)*chunksize], dimlengths[1:])
+    for x in range(0, dimlengths[0])
+  ]
+
+def processSvarBlock(data: bytes) -> str:
+  ret = "SVAR Block (Strings and Arrays)\n"
+  while data:
+    hidden = data[0]&0x80
+    arraytype = data[0]&0x60
+    namelen = data[0]&0x1f
+    name = data[1:1+namelen].decode()
+    data=data[11:]
+    if not arraytype:
+      (pages, remain) = struct.unpack_from("<BH",data,0)
+      string_len = pages*16384 + remain
+      ret += f"  {name}$ [{string_len} bytes]\n{hexDump(data[3:string_len+3],'  | ')}"
+      data = data[3+string_len:]
+    else:
+      (pages, remain) = struct.unpack_from("<BH",data,0)
+      array_len = pages*16384 + remain
+      adata = data[3:array_len+3]
+      data = data[3+array_len:]
+      dimensions = adata[0]
+      dimlengths = []
+      adata = adata[1:]
+      for _ in range(dimensions):
+        dimlengths.append(struct.unpack("<H",adata[:2])[0])
+        adata = adata[2:]
+      if arraytype&0x40:
+        retarray = unpackSvarStringArray(adata, dimlengths)
+        ret += f"  {name}$({', '.join([str(x) for x in dimlengths])}) [{array_len} bytes]\n"
+      else:
+        retarray = unpackSvarNumberArray(adata, dimlengths)
+        ret += f"  {name}({', '.join([str(x) for x in dimlengths])}) [{array_len} bytes]\n"
+      ret += ''.join([f"  | {x}" for x in pprint.pformat(retarray).splitlines(True)])
+      ret += "\n"
+  ret += hexDump(data)
+  return ret
+
+def processNvarBlock(data: bytes) -> str:
+  ret = "NVAR Block (Ints and Floats)\n"
+  invalid = bytes([0xff,0xff])
+  offsets = [
+    (chr(0x61 + x), 2*x + 1 + struct.unpack_from("<H", data, 2*x)[0])
+    for x in range(26)
+    if data[2*x:2*(x+1)] != invalid
+  ]
+  for firstchar, offset in offsets:
+    while offset < len(data):
+      nextoffset = struct.unpack_from("<H", data, offset+1)[0]
+      namelen = data[offset]&0x1f
+      name = firstchar + data[offset+3:offset+3+namelen].decode()
+      try:
+        if data[offset]&0x40: # for next
+          value = fpc(data[offset+3+namelen:offset+3+namelen+5])
+          limit = fpc(data[offset+8+namelen:offset+8+namelen+5])
+          step = fpc(data[offset+13+namelen:offset+13+namelen+5])
+          (pages, remain) = struct.unpack_from("<BH",data,offset+18+namelen)
+          loopaddr = pages*16384 + remain
+          loopstatment = data[offset+21+namelen]
+          ret = ret + f"  {name}: {value} (Limit: {limit}, Step:{step}, Addr:{loopaddr}, Stmnt:{loopstatment})\n"
+        else:
+          ret = ret + f"  {name}: {fpc(data[offset+3+namelen:offset+3+namelen+5])}\n"
+      except FPCError as exc:
+        print(f"error parsing {name} {exc}")
+      offset = offset + nextoffset + 2
+      if nextoffset == invalid:
+        break
+
+  return ret
+
+def basicToAscii(data: bytes, dirent: Dos.dirEnt) -> str:
+  offsets: Dos.dirEnt.dirEntBasicInfo = dirent.getExtendedInfo()
+  ret = ""
+  offset = 0
+  while offset < len(data):
+    if data[offset] == 0xff:
+      ret += "[%07d]   EOF End of Listing\n"%(dirent.startAddress+offset)
+      break
+    if offset+4 > len(data):
+      raise BasicEncodingError("Program Listing does not end on 0xff")
+    
+    lineNum=struct.unpack_from(">H",data,offset)[0]
+    lineLen=struct.unpack_from("<H",data,offset+2)[0]
+    offset += 4
+    line = data[offset:offset+lineLen]
+    try:
+      print(hexDump(line,"                 "))
+      print("[%07d] %5d %s\n"%(dirent.startAddress+offset-4, lineNum, expandLine(line)))
+      ret += "[%07d] %5d %s\n"%(dirent.startAddress+offset-4, lineNum, expandLine(line))
+    except (BasicEncodingError, FPCError) as exc:
+      ret += "[%07d] %5d %s\n"%(dirent.startAddress+offset-4, lineNum, f"ERROR: {exc}")
+    offset += lineLen
+
+  nvarblock = data[offsets.nvarStart:offsets.nvarEnd]
+  ret += "[%07d]  NVAR %d bytes\n"%(offsets.nvarStart+dirent.startAddress, len(nvarblock))
+
+  padding = data[offsets.nvarEnd:offsets.svarStart]
+  ret += "[%07d]       %d bytes of padding\n"%(offsets.nvarEnd+dirent.startAddress, len(padding))
+  
+  svarblock = data[offsets.svarStart:]
+  ret += "[%07d]  SVAR %d bytes\n"%(offsets.svarStart+dirent.startAddress, len(svarblock))
+  
+  ret += "\n"
+  ret += processNvarBlock(nvarblock)
+  ret += "\n"
+  ret += processSvarBlock(svarblock)
+
   return ret

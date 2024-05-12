@@ -28,9 +28,22 @@ class DiskImage():
 
 class Dos():
   class dirEnt():
+    class dirEntBasicInfo():
+      def __init__(self, data: bytes) -> None:
+        (pages, remain) = struct.unpack_from("<BH",data,0)
+        self.nvarStart= pages*16384 + remain - 0x8000
+        (pages, remain) = struct.unpack_from("<BH",data,3)
+        self.nvarEnd = pages*16384 + remain - 0x8000 
+        (pages, remain) = struct.unpack_from("<BH",data,6)
+        self.svarStart = pages*16384 + remain - 0x8000
+      
+      def __str__(self) -> str:
+        return f"{self.nvarStart} {self.nvarEnd} {self.svarStart}"
+
+
     fileTypes = {
       5: ("ZX Snapshot file","SNP 48k"),
-      16: ("SAM BASIC program","BASIC"),
+      16: ("SAM BASIC program","BASIC", dirEntBasicInfo),
       17: ("Numeric array","D ARRAY"),
       18: ("String array","$ ARRAY"),
       19: ("Code file","CODE"),
@@ -50,8 +63,13 @@ class Dos():
       self.filename = data[1:11] #.decode()
       (self.sectors, self.track, self.sector)=struct.unpack_from(">HBB",data,11)
       self.sectorAddressMap = data[15:210]
+      self.fileTypeInfo = self.getExtendedInfo()
+      (pages, remain) = struct.unpack_from("<BH",data,236)
+      self.startAddress = 16384*(pages&7) + remain
       (pages, remain) = struct.unpack_from("<BH",data,239)
       self.totalBytes = 16384*pages + remain
+      (pages, remain) = struct.unpack_from("<BH",data,242)
+      self.executeAddress = 16384*pages + remain
 
     def __str__(self):
       return("%3d: %10s %8d %s"%(self.fileNum, self.filename.decode(), self.totalBytes, self.lookupType(self.fileType)))
@@ -60,6 +78,13 @@ class Dos():
       if code in self.fileTypes:
         return self.fileTypes[code][1]
       return "???"
+    
+    def getExtendedInfo(self):
+      if self.fileType in self.fileTypes:
+        if len(self.fileTypes[self.fileType])>2:
+          return self.fileTypes[self.fileType][2](self.raw[221:232])
+      return None
+
 
   DE = typing.TypeVar('DE', bound=dirEnt)
 
@@ -68,7 +93,7 @@ class SamDos(Dos):
 
   def __init__(self, disk: DiskImage):
     self.diskImage = disk
-    self.directory = {}
+    self.directory: typing.Dict[int, Dos.DE] = {}
     self.diskName = "SAM DOS"
     for fileNum in range(0,80):
       trackOs = int(fileNum/20)
@@ -84,7 +109,7 @@ class SamDos(Dos):
     for entry in iter(self):
       print(entry)
 
-  def extractFile(self, fileNum: int) -> bytes:
+  def extractFile(self, fileNum: int) -> typing.Tuple[bytes, bytes]:
     fileInfo = self.directory[fileNum]
     if(fileInfo.deleted):
       raise FileNotFoundError()
@@ -101,7 +126,7 @@ class SamDos(Dos):
       raise EOFError("Read %d expected %d"%(len(data),fileInfo.totalBytes))
     fileHdr = data[:9]
     data = data[9:]
-    return fileHdr,data[:fileInfo.totalBytes]
+    return fileHdr, data[:fileInfo.totalBytes]
 
   def __iter__(self):
     self.ptr = 0
@@ -165,7 +190,10 @@ class MasterDos(SamDos):
     while True:
       # use SamDos iterator but filter on working directory
       ret = super().__next__()
-      if ret.inDir == self.directory[self.curDir].dirTag:
+      if self.curDir:
+        if ret.inDir == self.directory[self.curDir].dirTag:
+          return ret
+      elif not ret.inDir:
         return ret
 
   def pwd(self, subDir: int=None):
